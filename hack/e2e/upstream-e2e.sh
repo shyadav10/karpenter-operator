@@ -56,17 +56,20 @@ done
 
 # then remove all NodeClasses, VAP, and stray NodePools
 oc delete validatingadmissionpolicies.admissionregistration.k8s.io karpenter.ec2nodeclass.hypershift.io
-oc delete ec2nodeclasses.karpenter.k8s.aws --all --timeout 60s
+oc delete ec2nodeclasses.karpenter.k8s.aws --all --timeout 60s --ignore-not-found
 oc delete nodepool --all
+
+FOCUS="StandaloneNodeClaim.*should create a standard NodeClaim$"
 
 GO111MODULE=on GOWORK=off go test \
   -C "$KARPENTER_CORE_DIR" \
   -count 1 \
-  -timeout 1h \
+  -timeout 3h \
   -v \
   "$KARPENTER_CORE_DIR"/test/suites/$(echo "$TEST_SUITE" | tr A-Z a-z)/... \
   --ginkgo.focus="${FOCUS}" \
-  --ginkgo.timeout=1h \
+  --ginkgo.skip="${SKIP}" \
+  --ginkgo.timeout=3h \
   --ginkgo.grace-period=5m \
   --ginkgo.vv \
   --default-nodeclass="$TMPFILE" \

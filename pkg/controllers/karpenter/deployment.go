@@ -13,6 +13,10 @@ import (
 	"github.com/samber/lo"
 )
 
+func karpenterSelector() *metaac.LabelSelectorApplyConfiguration {
+	return metaac.LabelSelector().WithMatchLabels(map[string]string{appLabelKey: karpenterName})
+}
+
 // buildDeployment constructs the karpenter Deployment apply configuration.
 func buildDeployment(cfg *operandConfig, ownerRef *metaac.OwnerReferenceApplyConfiguration) (*appsac.DeploymentApplyConfiguration, error) {
 	selectorLabels := map[string]string{appLabelKey: karpenterName}
@@ -23,12 +27,24 @@ func buildDeployment(cfg *operandConfig, ownerRef *metaac.OwnerReferenceApplyCon
 		return nil, err
 	}
 
-	return appsac.Deployment(karpenterName, cfg.namespace).
+	// Deployment labels - add managed-by label for MonitorOperandsRolloutStatus
+	deploymentLabels := map[string]string{
+		appLabelKey:                          karpenterName,
+		"hypershift.openshift.io/managed-by": "karpenter-operator",
+	}
+
+	// Deployment annotations - add version annotation for MonitorOperandsRolloutStatus
+	deploymentAnnotations := map[string]string{}
+	if cfg.releaseVersion != "" {
+		deploymentAnnotations["release.openshift.io/version"] = cfg.releaseVersion
+	}
+
+	deployment := appsac.Deployment(karpenterName, cfg.namespace).
 		WithOwnerReferences(ownerRef).
-		WithLabels(selectorLabels).
+		WithLabels(deploymentLabels).
 		WithSpec(appsac.DeploymentSpec().
 			WithReplicas(1).
-			WithSelector(metaac.LabelSelector().WithMatchLabels(selectorLabels)).
+			WithSelector(karpenterSelector()).
 			WithTemplate(coreac.PodTemplateSpec().
 				WithAnnotations(map[string]string{
 					targetWorkloadManagementAnnotation: targetWorkloadSchedulingPriority,
@@ -37,7 +53,14 @@ func buildDeployment(cfg *operandConfig, ownerRef *metaac.OwnerReferenceApplyCon
 				WithLabels(podLabels).
 				WithSpec(podSpec),
 			),
-		), nil
+		)
+
+	// Add version annotation to deployment if present
+	if len(deploymentAnnotations) > 0 {
+		deployment = deployment.WithAnnotations(deploymentAnnotations)
+	}
+
+	return deployment, nil
 }
 
 // buildPodSpec constructs the karpenter operand pod spec.

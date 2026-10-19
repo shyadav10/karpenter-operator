@@ -5,19 +5,22 @@ import (
 )
 
 const (
+	// KarpenterImageOverrideAnnotation overrides the Karpenter operand image that
+	// the operator deploys in Management Cluster mode.
+	KarpenterImageOverrideAnnotation = "autoscaling.openshift.io/karpenter-image"
+
 	// KarpenterCoreE2EOverrideAnnotation is an annotation to be applied to a HostedCluster that allows
 	// overriding the default behavior of the Karpenter Operator for upstream Karpenter core E2E testing purposes.
 	KarpenterCoreE2EOverrideAnnotation = "hypershift.openshift.io/karpenter-core-e2e-override"
 
-	// KarpenterProviderAWSImage overrides the Karpenter AWS provider image to use for
-	// a HostedControlPlane with AutoNode enabled.
-	KarpenterProviderAWSImage = "hypershift.openshift.io/karpenter-provider-aws-image"
-
-	// TokenSecretNodePoolAnnotation is used to annotate the Karpenter token secret with its hyperv1.NodePool namespaced name.
+	// TokenSecretNodePoolAnnotation is used to annotate the Karpenter token secret with its hyperv1beta1.NodePool namespaced name.
 	TokenSecretNodePoolAnnotation = "hypershift.openshift.io/nodePool"
 
 	// UserDataAMILabel is a label set in the userData secret generated for karpenter instances.
 	UserDataAMILabel = "hypershift.openshift.io/ami"
+
+	// ManagedByKarpenterLabel is a label set on the token and userData secrets generated for karpenter instances.
+	ManagedByKarpenterLabel = "hypershift.openshift.io/managed-by-karpenter"
 
 	// ConditionTypeReady is the top-level readiness condition for the OpenshiftEC2NodeClass.
 	// It is computed atomically by the EC2 node class controller, combining the upstream
@@ -392,9 +395,10 @@ type BlockDeviceMapping struct {
 	DeviceName string `json:"deviceName,omitempty"`
 
 	// ebs contains parameters used to automatically set up EBS volumes when an instance is launched.
+	// It must specify either snapshotID or volumeSizeGiB.
 	// +kubebuilder:validation:XValidation:message="snapshotID or volumeSizeGiB must be defined",rule="has(self.snapshotID) || has(self.volumeSizeGiB)"
-	// +optional
-	EBS BlockDevice `json:"ebs,omitempty,omitzero"`
+	// +required
+	EBS BlockDevice `json:"ebs"`
 
 	// rootVolume indicates whether this device is mounted as kubelet root dir. You can
 	// configure at most one root volume in BlockDeviceMappings.

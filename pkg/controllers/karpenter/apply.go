@@ -79,7 +79,13 @@ func applyClusterRoleBindings(ctx context.Context, cl client.Client, namespace s
 func applyDeployment(ctx context.Context, cl client.Client, cfg *operandConfig, ownerRef *metaac.OwnerReferenceApplyConfiguration) error {
 	dep, err := buildDeployment(cfg, ownerRef)
 	if err != nil {
-		return fmt.Errorf("failed to build deployment: %w", err)
+		return fmt.Errorf("building deployment: %w", err)
 	}
 	return cl.Apply(ctx, dep, client.FieldOwner(fieldManager), client.ForceOwnership)
+}
+
+// applyPodMonitor applies the PodMonitor for the karpenter operand.
+func applyPodMonitor(ctx context.Context, cl client.Client, cfg *operandConfig, ownerRef *metaac.OwnerReferenceApplyConfiguration) error {
+	podMonitor := buildPodMonitor(cfg, ownerRef)
+	return cl.Apply(ctx, podMonitor, client.FieldOwner(fieldManager), client.ForceOwnership)
 }

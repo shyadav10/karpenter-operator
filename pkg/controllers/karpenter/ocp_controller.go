@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	openshiftkarpenterv1 "github.com/openshift/karpenter-operator/api/karpenter/v1"
 	autoscalingv1alpha1 "github.com/openshift/karpenter-operator/pkg/apis/autoscaling/v1alpha1"
 	"github.com/openshift/karpenter-operator/pkg/assets"
 	"github.com/openshift/karpenter-operator/pkg/cloudprovider/common"
@@ -17,8 +18,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/samber/lo"
 )
 
@@ -51,18 +52,25 @@ func (c *OCPController) Name() string {
 }
 
 func (c *OCPController) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	log.FromContext(ctx).Info("reconciling karpenter deployment")
-
 	karp := &autoscalingv1alpha1.Karpenter{}
 	if err := c.client.Get(ctx, client.ObjectKey{Name: autoscalingv1alpha1.SingletonName}, karp); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	karpenterImage := c.config.KarpenterImage
+	// override Karpenter image if annotation on Karpenter CR exists
+	if karp.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation] != "" {
+		karpenterImage = karp.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation]
+	}
+	if karpenterImage == "" {
+		return ctrl.Result{}, fmt.Errorf("karpenter image is not set")
 	}
 
 	ref := ocpOwnerRef(karp)
 	ns := c.config.Namespace
 
 	if err := applyServiceAccount(ctx, c.client, ns, ref); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile ServiceAccount: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling ServiceAccount: %w", err)
 	}
 
 	cloudRBAC := c.config.CloudProvider.RBAC()
@@ -70,22 +78,22 @@ func (c *OCPController) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Res
 	coreRoleBindings := append(assets.CoreRBAC.RoleBindings, cloudRBAC.RoleBindings...)
 
 	if err := applyClusterRoles(ctx, c.client, ref, append(assets.CoreRBAC.ClusterRoles, cloudRBAC.ClusterRoles...)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile ClusterRoles: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling ClusterRoles: %w", err)
 	}
 	if err := applyClusterRoleBindings(ctx, c.client, ns, ref, append(assets.CoreRBAC.ClusterRoleBindings, cloudRBAC.ClusterRoleBindings...)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile ClusterRoleBindings: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling ClusterRoleBindings: %w", err)
 	}
 
 	if err := applyRoles(ctx, c.client, ns, ref, coreRoles); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Roles: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling Roles: %w", err)
 	}
 	if err := applyRoleBindings(ctx, c.client, ns, ref, coreRoleBindings); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile RoleBindings: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling RoleBindings: %w", err)
 	}
 
 	cfg := &operandConfig{
 		namespace:       c.config.Namespace,
-		karpenterImage:  c.config.KarpenterImage,
+		karpenterImage:  karpenterImage,
 		clusterName:     c.config.ClusterName,
 		clusterEndpoint: c.config.ClusterEndpoint,
 		cloudProvider:   c.config.CloudProvider,
@@ -93,7 +101,10 @@ func (c *OCPController) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Res
 		logLevelArg:     karp.Spec.LogLevel.Arg(),
 	}
 	if err := applyDeployment(ctx, c.client, cfg, ref); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling Deployment: %w", err)
+	}
+	if err := applyPodMonitor(ctx, c.client, cfg, ref); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling PodMonitor: %w", err)
 	}
 
 	return ctrl.Result{}, nil
@@ -114,6 +125,7 @@ func (c *OCPController) SetupWithManager(mgr ctrl.Manager) error {
 		Named(c.Name()).
 		For(&autoscalingv1alpha1.Karpenter{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&monitoringv1.PodMonitor{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).

@@ -31,61 +31,55 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
-## Tool Binaries
-YQ ?= $(LOCALBIN)/yq
-GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
-HELM ?= $(LOCALBIN)/helm
-CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
-
 ## Tool Versions
 YQ_VERSION            ?= v4.53.6
 GOLANGCI_LINT_VERSION ?= v2.13.2
 HELM_VERSION          ?= v4.3.0
 CONTROLLER_GEN_VERSION ?= v0.22.0
 
+## Tool Binaries
+YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+HELM ?= $(LOCALBIN)/helm-$(HELM_VERSION)
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
+
 ##@ Tools
+
+define install-tool
+	echo "Installing $(notdir $(2))..." && \
+	rm -f "$(LOCALBIN)/$(1)" && \
+	$(3) && \
+	mv "$(LOCALBIN)/$(1)" "$(2)"
+endef
+
+define link-tool
+	ln -sf "$(abspath $(2))" "$(LOCALBIN)/$(1)"
+endef
 
 .PHONY: yq
 yq: $(YQ) ## Install yq locally if necessary.
-$(YQ): $(LOCALBIN)
-	@if test -s $(YQ) && $(YQ) --version 2>/dev/null | grep -q "$(YQ_VERSION)"; then \
-	  true; \
-	else \
-	  echo "Installing yq $(YQ_VERSION)..."; \
-	  GOBIN=$(LOCALBIN) GOFLAGS= go install github.com/mikefarah/yq/v4@$(YQ_VERSION); \
-	fi
+	@$(call link-tool,yq,$(YQ))
+$(YQ): | $(LOCALBIN)
+	@$(call install-tool,yq,$(YQ),GOBIN="$(LOCALBIN)" GOFLAGS= go install github.com/mikefarah/yq/v4@$(YQ_VERSION))
 
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Install golangci-lint locally if necessary.
-$(GOLANGCI_LINT): $(LOCALBIN)
-	@if test -s $(GOLANGCI_LINT) && $(GOLANGCI_LINT) version 2>/dev/null | grep -q "$(subst v,,$(GOLANGCI_LINT_VERSION))"; then \
-	  true; \
-	else \
-	  echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."; \
-	  curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION); \
-	fi
+	@$(call link-tool,golangci-lint,$(GOLANGCI_LINT))
+$(GOLANGCI_LINT): | $(LOCALBIN)
+	@$(call install-tool,golangci-lint,$(GOLANGCI_LINT),curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$(LOCALBIN)" $(GOLANGCI_LINT_VERSION))
 
 .PHONY: helm
 helm: $(HELM) ## Install helm locally if necessary.
-$(HELM): $(LOCALBIN)
-	@PLATFORM=$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/'); \
-	if test -s $(HELM) && $(HELM) version 2>/dev/null | grep -q "$(HELM_VERSION)"; then \
-	  true; \
-	else \
-	  echo "Installing helm $(HELM_VERSION)..."; \
-	  curl -sSL "https://get.helm.sh/helm-$(HELM_VERSION)-$${PLATFORM}.tar.gz" \
-	    | tar -xz --strip-components=1 -C $(LOCALBIN) "$${PLATFORM}/helm"; \
-	fi
+	@$(call link-tool,helm,$(HELM))
+$(HELM): | $(LOCALBIN)
+	@PLATFORM=$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
+	  $(call install-tool,helm,$(HELM),curl -sSL "https://get.helm.sh/helm-$(HELM_VERSION)-$${PLATFORM}.tar.gz" | tar -xz --strip-components=1 -C "$(LOCALBIN)" "$${PLATFORM}/helm")
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Install controller-gen locally if necessary.
-$(CONTROLLER_GEN): $(LOCALBIN)
-	@if test -s $(CONTROLLER_GEN) && $(CONTROLLER_GEN) --version 2>/dev/null | grep -q "$(CONTROLLER_GEN_VERSION)"; then \
-	  true; \
-	else \
-	  echo "Installing controller-gen $(CONTROLLER_GEN_VERSION)..."; \
-	  GOBIN=$(LOCALBIN) GOFLAGS= go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION); \
-	fi
+	@$(call link-tool,controller-gen,$(CONTROLLER_GEN))
+$(CONTROLLER_GEN): | $(LOCALBIN)
+	@$(call install-tool,controller-gen,$(CONTROLLER_GEN),GOBIN="$(LOCALBIN)" GOFLAGS= go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION))
 
 ##@ Development
 
@@ -103,6 +97,7 @@ generate: $(CONTROLLER_GEN) ## Generate deepcopy methods.
 manifests: $(CONTROLLER_GEN) ## Generate CRD manifests.
 	$(CONTROLLER_GEN) crd paths="./pkg/apis/..." output:crd:artifacts:config=install
 	@mv install/autoscaling.openshift.io_karpenters.yaml install/00_autoscaling.openshift.io_karpenters.yaml
+	$(CONTROLLER_GEN) crd paths="./api/karpenter/..." output:crd:artifacts:config=pkg/assets/hypershift
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -131,7 +126,7 @@ manifest-diff-sync: $(YQ) $(HELM) ## Regenerate RBAC manifests from sources.
 	YQ=$(YQ) hack/manifest-diff.sh --sync
 
 .PHONY: verify-git-clean
-verify-git-clean: vendor
+verify-git-clean: deps api-deps
 	git diff-index --cached --quiet --ignore-submodules HEAD --
 	git diff-files --quiet --ignore-submodules
 	git diff --exit-code HEAD --
@@ -156,10 +151,18 @@ verify: vet lint test ## Run all verification checks.
 	$(MAKE) manifest-diff
 	$(MAKE) verify-git-clean
 
-.PHONY: vendor
-vendor: ## Tidy and vendor Go modules.
+.PHONY: deps
+deps: # Updates Go modules
 	go mod tidy
 	go mod vendor
+	go mod verify
+
+.PHONY: api-deps
+api-deps:
+	cd api && \
+		go mod tidy && \
+		go mod vendor && \
+		go mod verify
 
 ##@ Build
 

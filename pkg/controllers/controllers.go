@@ -2,13 +2,19 @@ package controllers
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/openshift/karpenter-operator/pkg/assets"
 	"github.com/openshift/karpenter-operator/pkg/cloudprovider/common"
 	"github.com/openshift/karpenter-operator/pkg/controllers/clusteroperator"
 	"github.com/openshift/karpenter-operator/pkg/controllers/crd"
+	"github.com/openshift/karpenter-operator/pkg/controllers/hcp/autonodestatus"
+	hcpdeletion "github.com/openshift/karpenter-operator/pkg/controllers/hcp/deletion"
 	"github.com/openshift/karpenter-operator/pkg/controllers/karpenter"
 	"github.com/openshift/karpenter-operator/pkg/controllers/machineapprover"
+	defaultnodeclass "github.com/openshift/karpenter-operator/pkg/controllers/nodeclass/default"
+
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -42,14 +48,28 @@ func NewControllers(mgr ctrl.Manager, cfg *Config) []Controller {
 	// operator is running in management cluster mode (see operator.Options.ManagementCluster).
 	var controllers []Controller
 
+	hcpNodeClassProvider := newHCPNodeClassProvider(cfg)
+
 	crdCfg := &crd.ControllerConfig{
 		Namespace:     cfg.Namespace,
-		CRDs:          append(assets.CoreCRDs, cfg.CloudProvider.CRDs()...),
+		CRDs:          karpenterCRDs(cfg, hcpNodeClassProvider),
 		HostedCluster: cfg.HostedCluster,
 	}
 	controllers = append(controllers, crd.NewController(mgr, crdCfg))
 
 	if cfg.ManagementCluster {
+		if hcpNodeClassProvider != nil {
+			controllers = append(controllers,
+				defaultnodeclass.NewController(mgr, &defaultnodeclass.ControllerConfig{
+					HostedCluster: cfg.HostedCluster,
+					Namespace:     cfg.Namespace,
+					Provider:      hcpNodeClassProvider,
+				}),
+			)
+			for _, controller := range hcpNodeClassProvider.NewControllers(cfg.HostedCluster, cfg.Namespace) {
+				controllers = append(controllers, controller)
+			}
+		}
 		controllers = append(controllers,
 			karpenter.NewHCPController(mgr.GetClient(), &karpenter.HCPControllerConfig{
 				Namespace:        cfg.Namespace,
@@ -60,6 +80,12 @@ func NewControllers(mgr ctrl.Manager, cfg *Config) []Controller {
 				TokenMinterImage: cfg.TokenMinterImage,
 			}),
 		)
+		if cfg.HostedCluster != nil {
+			controllers = append(controllers,
+				autonodestatus.NewController(mgr, &autonodestatus.ControllerConfig{HostedCluster: cfg.HostedCluster, Namespace: cfg.Namespace}),
+				hcpdeletion.NewController(mgr, &hcpdeletion.ControllerConfig{HostedCluster: cfg.HostedCluster, Namespace: cfg.Namespace}),
+			)
+		}
 
 		if controller := newMachineApproverController(cfg); controller != nil {
 			controllers = append(controllers, controller)
@@ -84,6 +110,23 @@ func NewControllers(mgr ctrl.Manager, cfg *Config) []Controller {
 	return controllers
 }
 
+// newHCPNodeClassProvider returns the platform NodeClass provider when running against a hosted cluster.
+func newHCPNodeClassProvider(cfg *Config) common.HCPNodeClassProvider {
+	if !cfg.ManagementCluster || cfg.HostedCluster == nil {
+		return nil
+	}
+	return cfg.CloudProvider.HCPNodeClassProvider()
+}
+
+// karpenterCRDs returns the CRDs installed into the target cluster.
+func karpenterCRDs(cfg *Config, hcpNodeClassProvider common.HCPNodeClassProvider) []*apiextensionsv1.CustomResourceDefinition {
+	crds := append(slices.Clone(assets.CoreCRDs), cfg.CloudProvider.CRDs()...)
+	if hcpNodeClassProvider != nil {
+		crds = append(crds, hcpNodeClassProvider.CRDs()...)
+	}
+	return crds
+}
+
 func newMachineApproverController(cfg *Config) Controller {
 	if cfg.HostedCluster == nil {
 		return nil
@@ -94,13 +137,13 @@ func newMachineApproverController(cfg *Config) Controller {
 		return nil
 	}
 
-	return machineapprover.NewMachineApproverController(cfg.HostedCluster, verifier)
+	return machineapprover.NewController(cfg.HostedCluster, verifier)
 }
 
 func Setup(mgr ctrl.Manager, controllers ...Controller) error {
 	for _, c := range controllers {
 		if err := c.SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("failed to setup controller: %w", err)
+			return fmt.Errorf("setting up controller: %w", err)
 		}
 	}
 	return nil

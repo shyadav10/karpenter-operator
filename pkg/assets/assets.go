@@ -25,6 +25,9 @@ var azureContent embed.FS
 //go:embed crds/*.yaml
 var crdContent embed.FS
 
+//go:embed hypershift/*.yaml
+var hypershiftContent embed.FS
+
 var (
 	// CoreRBAC holds cloud-agnostic operand RBAC (namespace-scoped and cluster-scoped).
 	// Decoded once at init from embedded YAML; treat as read-only.
@@ -40,8 +43,14 @@ var (
 	// AWSCRDs holds AWS-specific Karpenter CRDs (EC2NodeClass).
 	AWSCRDs []*apiextensionsv1.CustomResourceDefinition
 
+	// AWSHCPCRDs holds AWS-specific HyperShift CRDs (OpenshiftEC2NodeClass) for hosted clusters.
+	AWSHCPCRDs []*apiextensionsv1.CustomResourceDefinition
+
 	// AzureCRDs holds Azure-specific Karpenter CRDs (AKSNodeClass).
 	AzureCRDs []*apiextensionsv1.CustomResourceDefinition
+
+	// AzureHCPCRDs holds Azure-specific HyperShift CRDs (OpenShiftAzureNodeClass) for hosted clusters.
+	AzureHCPCRDs []*apiextensionsv1.CustomResourceDefinition
 )
 
 func init() {
@@ -95,10 +104,18 @@ func init() {
 		mustDecode(awsContent, "aws/karpenter.k8s.aws_ec2nodeclasses.yaml").(*apiextensionsv1.CustomResourceDefinition),
 	}
 
+	AWSHCPCRDs = []*apiextensionsv1.CustomResourceDefinition{
+		mustDecode(hypershiftContent, "hypershift/karpenter.hypershift.openshift.io_openshiftec2nodeclasses.yaml").(*apiextensionsv1.CustomResourceDefinition),
+	}
+
 	AzureCRDs = []*apiextensionsv1.CustomResourceDefinition{
 		mustDecode(azureContent, "azure/karpenter.azure.com_aksnodeclasses.yaml").(*apiextensionsv1.CustomResourceDefinition),
 		// TODO(maxcao13): Azure Karpenter Provider requires this CRD to exist, but we don't formally support NodeOverlay yet.
 		// https://redhat.atlassian.net/browse/RFE-9604
 		mustDecode(crdContent, "crds/karpenter.sh_nodeoverlays.yaml").(*apiextensionsv1.CustomResourceDefinition),
+	}
+
+	AzureHCPCRDs = []*apiextensionsv1.CustomResourceDefinition{
+		mustDecode(hypershiftContent, "hypershift/karpenter.hypershift.openshift.io_openshiftazurenodeclasses.yaml").(*apiextensionsv1.CustomResourceDefinition),
 	}
 }

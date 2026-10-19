@@ -1,7 +1,7 @@
 # AGENTS.md — openshift/karpenter-operator
 
 Guidance for AI agents working in this repository.
-See [README.md](./README.md) for user documentation and [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow.
+See [README.md](./README.md) for user documentation, [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution workflow, [CONVENTIONS.md](./CONVENTIONS.md) for code and test conventions, and [TESTING.md](./TESTING.md) for testing guidance.
 
 ## Project overview
 
@@ -11,14 +11,20 @@ Karpenter scheduling logic runs in the operand.
 
 ## Architecture
 
-Controller selection depends on deployment mode:
+Controller selection is centralized in [`pkg/controllers/controllers.go`](./pkg/controllers/controllers.go) and depends on deployment mode and cloud-provider capabilities:
 
-- `pkg/controllers/crd` installs Karpenter CRDs in both modes.
-- `pkg/controllers/karpenter` contains mode-specific operand reconcilers: `OCPController` for standalone clusters and `HCPController` for management clusters.
-- `pkg/controllers/clusteroperator` reports operator health in standalone mode.
+- `pkg/controllers/crd` installs Karpenter and provider CRDs in both modes, including hosted-control-plane NodeClass CRDs when supported and a hosted-cluster client is configured.
+- `pkg/controllers/karpenter` deploys the operand using `OCPController` in standalone mode and `HCPController` in management-cluster mode.
+- `pkg/controllers/hcp/autonodestatus` reports hosted-cluster counts in `HostedControlPlane.Status.AutoNode`.
+- `pkg/controllers/hcp/deletion` cleans up NodePools/NodeClaims and removes the `HostedControlPlane` finalizer on HCP/CAPI deletion.
+- `pkg/controllers/clusteroperator` reports operator health in standalone mode only.
+- `pkg/controllers/nodeclass/default` reconciles a provider-supplied default NodeClass from `HostedControlPlane` configuration in management-cluster mode. It requires a hosted-cluster client and provider support for hosted-control-plane NodeClasses.
+- `pkg/controllers/nodeclass/ec2` is selected through the AWS NodeClass provider under those same conditions. It reconciles hosted-cluster `OpenshiftEC2NodeClass` resources into operand-facing `EC2NodeClass` resources and maintains the management-cluster subnets ConfigMap.
+- `pkg/controllers/nodeclass/azure` is selected through the Azure NodeClass provider under those same conditions. It reconciles hosted-cluster `OpenShiftAzureNodeClass` resources into operand-facing `AKSNodeClass` resources.
+- `pkg/controllers/machineapprover` approves CSRs for Karpenter-provisioned nodes in management-cluster mode, when a hosted-cluster client and a provider-supplied node identity verifier are available.
 
 In standalone mode, the operand controller reconciles the singleton `autoscaling.openshift.io/v1alpha1` `Karpenter` resource named `default`.
-In management-cluster mode, the CRD controller uses the hosted-cluster client configured by `--target-kubeconfig`, while the operand controller watches `HostedControlPlane` objects in the management cluster.
+In management-cluster mode, the operand controller watches `HostedControlPlane` objects and deploys the operand in the management cluster. `--target-kubeconfig` configures the secondary hosted-cluster client used for CRD installation, NodeClass reconciliation, and CSR approval; NodeClass controllers also read configuration from the management cluster.
 `ClusterOperator` status is not reported in management-cluster mode.
 
 Two API groups serve different purposes:
@@ -35,7 +41,7 @@ Cloud-specific behavior belongs behind `pkg/cloudprovider/common.CloudProvider`;
 cmd/                     Binary entry point
 api/                     Separate Go module for operand-facing APIs
 pkg/apis/autoscaling/    Operator lifecycle API
-pkg/controllers/         Controller wiring; CRD, OCP/HCP operand, and ClusterOperator controllers
+pkg/controllers/         Karpenter deployment and OpenShift integration controllers
 pkg/cloudprovider/       Cloud-provider interface and implementations
 pkg/assets/              Embedded CRDs and RBAC
 install/                 Operator installation manifests
@@ -50,18 +56,22 @@ test/                    E2E suites and shared helpers
    Management-cluster mode deploys operands from `HostedControlPlane` objects and does not register the `ClusterOperator` controller.
 3. Root-module Go commands do not traverse `api/`; run module-specific commands there when needed.
 4. Use `hosted cluster`, not `guest cluster`, for HyperShift terminology.
-5. Follow the test naming and fixture guidance in [CONTRIBUTING.md](./CONTRIBUTING.md) when adding or modifying tests.
+5. Follow [CONVENTIONS.md](./CONVENTIONS.md#test-conventions) for test naming and table structure, and [TESTING.md](./TESTING.md) for test workflows when adding or modifying tests.
 
 ## Generated files
 
 Never edit these files directly:
 
 - `api/karpenter/v1/zz_generated.deepcopy.go` and `pkg/apis/autoscaling/v1alpha1/zz_generated.deepcopy.go` — `make generate`
-- `install/00_autoscaling.openshift.io_karpenters.yaml` — `make manifests`
+- `install/00_autoscaling.openshift.io_karpenters.yaml` and `pkg/assets/hypershift/*.yaml` — `make manifests`
 - `pkg/assets/karpenter/*.yaml`, `pkg/assets/aws/*.yaml`, and `pkg/assets/crds/*.yaml` — `make manifest-diff-sync`
 - `install/04_rbac.yaml` — `make manifest-diff-sync`
 
 `make verify` checks generated content and working-tree cleanliness.
+
+## Code style and conventions
+
+See [CONVENTIONS.md](./CONVENTIONS.md) for code style and conventions.
 
 ## Human review required
 
@@ -75,7 +85,7 @@ Stop and ask before:
 ## Paired changes
 
 - Changes under `pkg/apis/autoscaling/` require `make generate && make manifests`.
-- Changes to types under `api/karpenter/` require `make generate`.
+- Changes to types under `api/karpenter/` require `make generate && make manifests`.
 - Operand branch or manifest changes require `make manifest-diff-sync`; review all changes under `pkg/assets/` and `install/04_rbac.yaml`.
 - Dependency changes under `api/` require dependency commands from that module.
 - Run `make verify` before submitting changes.

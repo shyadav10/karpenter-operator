@@ -17,19 +17,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const (
 	clusterOperatorName = "karpenter"
 	fieldManager        = "karpenter-operator"
+
+	reasonUnsupportedPlatform = "UnsupportedPlatform"
 )
 
 type ControllerConfig struct {
 	Namespace                string
 	ReleaseVersion           string
 	AdditionalRelatedObjects []configv1.ObjectReference
+
+	// UnsupportedPlatform is set when Karpenter is not deployed on the cluster's platform.
+	// CVO still installs the operator and waits for its ClusterOperator to become available,
+	// so the controller reports it as available.
+	UnsupportedPlatform *configv1.PlatformType
 }
 
 type Controller struct {
@@ -49,13 +55,16 @@ func (r *Controller) Name() string {
 }
 
 func (r *Controller) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
-	log.FromContext(ctx).Info("reconciling ClusterOperator status")
-
 	var conditions []*configac.ClusterOperatorStatusConditionApplyConfiguration
-	conditions = append(conditions, r.operandConditions(ctx)...)
+	if r.config.UnsupportedPlatform != nil {
+		conditions = availableConditions(reasonUnsupportedPlatform,
+			fmt.Sprintf("Karpenter is not supported on platform %s, no operand is deployed", *r.config.UnsupportedPlatform))
+	} else {
+		conditions = r.operandConditions(ctx)
+	}
 
 	if err := r.applyStatus(ctx, conditions); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update ClusterOperator status: %w", err)
+		return ctrl.Result{}, fmt.Errorf("updating ClusterOperator status: %w", err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -90,13 +99,13 @@ func (r *Controller) applyStatus(ctx context.Context, conditions []*configac.Clu
 	// Ensure the ClusterOperator object exists.
 	co := configac.ClusterOperator(clusterOperatorName)
 	if err := r.client.Apply(ctx, co, client.FieldOwner(fieldManager)); err != nil {
-		return fmt.Errorf("failed to apply ClusterOperator: %w", err)
+		return fmt.Errorf("applying ClusterOperator: %w", err)
 	}
 
 	// Read existing conditions to preserve LastTransitionTime for unchanged statuses.
 	existing := &configv1.ClusterOperator{}
 	if err := r.client.Get(ctx, client.ObjectKey{Name: clusterOperatorName}, existing); err != nil {
-		return fmt.Errorf("failed to read existing ClusterOperator: %w", err)
+		return fmt.Errorf("reading existing ClusterOperator: %w", err)
 	}
 
 	now := metav1.Now()
@@ -128,9 +137,16 @@ func (r *Controller) relatedObjects() []*configac.ObjectReferenceApplyConfigurat
 		configac.ObjectReference().WithGroup("apps").WithResource("deployments").WithName("karpenter-operator").WithNamespace(r.config.Namespace),
 		configac.ObjectReference().WithGroup("rbac.authorization.k8s.io").WithResource("clusterroles").WithName("karpenter-operator"),
 		configac.ObjectReference().WithGroup("rbac.authorization.k8s.io").WithResource("clusterrolebindings").WithName("karpenter-operator"),
-		configac.ObjectReference().WithGroup("karpenter.sh").WithResource("nodepools").WithName(""),
-		configac.ObjectReference().WithGroup("karpenter.sh").WithResource("nodeclaims").WithName(""),
 	}
+
+	// The NodePool and NodeClaim CRDs are not installed on unsupported platforms, so they cannot be referenced.
+	if r.config.UnsupportedPlatform == nil {
+		objs = append(objs,
+			configac.ObjectReference().WithGroup("karpenter.sh").WithResource("nodepools").WithName(""),
+			configac.ObjectReference().WithGroup("karpenter.sh").WithResource("nodeclaims").WithName(""),
+		)
+	}
+
 	for _, ref := range r.config.AdditionalRelatedObjects {
 		objs = append(objs, configac.ObjectReference().
 			WithGroup(ref.Group).

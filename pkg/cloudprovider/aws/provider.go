@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/openshift/karpenter-operator/pkg/cloudprovider/common"
 
@@ -27,10 +28,8 @@ func New(ctx context.Context, infra common.InfrastructureInfo) (*Provider, error
 		return nil, fmt.Errorf("region not available")
 	}
 
-	karpenterImage, err := common.RequireEnv(KarpenterImageEnvName)
-	if err != nil {
-		return nil, err
-	}
+	// Don't fail if the Karpenter image is not set
+	karpenterImage := os.Getenv(KarpenterImageEnvName)
 
 	if _, err := common.RequireEnv(AWSSharedAuthFileEnvName); err != nil {
 		return nil, err
@@ -38,7 +37,7 @@ func New(ctx context.Context, infra common.InfrastructureInfo) (*Provider, error
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(infra.Region))
 	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
 	return &Provider{
@@ -48,6 +47,11 @@ func New(ctx context.Context, infra common.InfrastructureInfo) (*Provider, error
 		karpenterImage:  karpenterImage,
 		ec2Client:       ec2.NewFromConfig(cfg, func(o *ec2.Options) { o.Region = infra.Region }),
 	}, nil
+}
+
+// HCPNodeClassProvider returns the provider's hosted control plane NodeClass provider.
+func (p *Provider) HCPNodeClassProvider() common.HCPNodeClassProvider {
+	return hcpEC2NodeClassProvider{}
 }
 
 // NodeIdentityVerifier returns the provider's node identity verifier.

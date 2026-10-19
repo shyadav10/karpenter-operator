@@ -81,56 +81,24 @@ To prevent premature merges:
 
 ## Testing
 
-- Unit tests are required for new logic, bug fixes, and behavior changes.
-  `make test` runs tests under `pkg/`.
-- Component or integration tests are recommended when changing interactions between packages.
-- End-to-end tests are expected for new features and significant behavior changes.
-  `make e2e` requires access to a cluster through `KUBECONFIG`.
-- `make karpenter-core-regression` runs the Karpenter core regression suite in the OpenShift Hosted Control Plane CI environment.
-- `make verify` runs vet, lint, unit tests, generation, manifest checks, and verifies that the working tree remains clean.
-
-### Test conventions
-
-Every Go test case name must follow this format:
-
-```go
-name: "When <condition>, it should <expected behavior>"
-```
-
-Use real-world values in test fixtures when possible, such as `quay.io/openshift-release-dev/ocp-release:4.21.10-x86_64` instead of `example.com/image:latest`.
-Real values catch edge cases that synthetic values miss.
-
-Before requesting review, run:
-
-```shell
-make build
-make verify
-```
-
-Then inspect the complete diff for unintended changes, credentials, and debug code.
+See [CONVENTIONS.md](./CONVENTIONS.md#test-conventions) for test naming, table structure, and fixture conventions.
+See [TESTING.md](./TESTING.md) for coverage requirements, test workflows, fixture updates, and pre-submission checks.
 
 ## Generated files
 
 Do not edit generated files directly:
 
 - `api/karpenter/v1/zz_generated.deepcopy.go` and `pkg/apis/autoscaling/v1alpha1/zz_generated.deepcopy.go` — run `make generate`
-- `install/00_autoscaling.openshift.io_karpenters.yaml` — run `make manifests`
+- `install/00_autoscaling.openshift.io_karpenters.yaml` and `pkg/assets/hypershift/*.yaml` — run `make manifests`
 - `pkg/assets/karpenter/*.yaml`, `pkg/assets/aws/*.yaml`, and `pkg/assets/crds/*.yaml` — run `make manifest-diff-sync`
 - `install/04_rbac.yaml` — run `make manifest-diff-sync`
 
 Commit generated changes with their source changes.
 The `api/` directory is a separate Go module; run Go dependency and formatting commands from that directory when changing its dependencies or source.
 
-## Code style
+## Code style and conventions
 
-- Run `make fmt` for root-module Go changes.
-- Run `make lint` or `make lint-fix`; `.golangci.yml` defines lint and import-order rules.
-- Use lowercase error strings without trailing punctuation, and wrap errors with context and `%w`.
-- Use structured logging with constant messages and key-value pairs.
-- Controllers utilize [Server Side Apply (SSA)][SSA] when applying and reconciling owned resources.
-- Match surrounding code and test style.
-
-[SSA]: https://kubernetes.io/blog/2022/10/20/advanced-server-side-apply/
+See [CONVENTIONS.md](./CONVENTIONS.md) for code style and conventions.
 
 ## AI code review
 

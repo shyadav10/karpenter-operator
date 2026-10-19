@@ -3,10 +3,12 @@ package karpenter
 import (
 	"context"
 	"fmt"
+	"time"
 
+	openshiftkarpenterv1 "github.com/openshift/karpenter-operator/api/karpenter/v1"
 	"github.com/openshift/karpenter-operator/pkg/cloudprovider/common"
 
-	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	hyperv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,8 +21,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 )
 
 const (
@@ -66,9 +69,9 @@ func (c *HCPController) Name() string {
 }
 
 func (c *HCPController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log.FromContext(ctx).Info("reconciling karpenter deployment on management cluster")
+	log := ctrl.LoggerFrom(ctx)
 
-	hcp := &hyperv1.HostedControlPlane{}
+	hcp := &hyperv1beta1.HostedControlPlane{}
 	if err := c.client.Get(ctx, req.NamespacedName, hcp); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -76,25 +79,43 @@ func (c *HCPController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// TODO(maxcao13): for now we always scale up karpenter if an HCP is provisioned (meaning always)
 	// In the future, we need to allow scale to zero based on the HCP AutoNode spec.
 	// https://redhat.atlassian.net/browse/AUTOSCALE-520
-	if hcp.Spec.AutoNode.Provisioner.Name != hyperv1.ProvisionerKarpenter {
-		log.FromContext(ctx).Info("HCP does not use Karpenter provisioner, skipping")
+	if hcp.Spec.AutoNode.Provisioner.Name != hyperv1beta1.ProvisionerKarpenter {
+		log.V(1).Info("HCP does not use Karpenter provisioner, skipping")
 		return ctrl.Result{}, nil
+	}
+
+	// Wait for HCP Status.ControlPlaneVersion to be set by HyperShift before proceeding.
+	// This ensures the karpenter deployment will have the correct version annotation
+	// for MonitorOperandsRolloutStatus tracking.
+	if hcp.Status.ControlPlaneVersion.Desired.Version == "" {
+		log.V(1).Info("Waiting for HCP control plane version to be set, requeuing in 5s")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	karpenterImage := c.config.KarpenterImage
+	// override Karpenter image if annotation on HCP exists
+	if hcp.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation] != "" {
+		karpenterImage = hcp.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation]
+	}
+	if karpenterImage == "" {
+		return ctrl.Result{}, fmt.Errorf("karpenter image is not set")
 	}
 
 	ref := hcpOwnerRef(hcp)
 
 	if err := applyServiceAccount(ctx, c.client, c.config.Namespace, ref); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile ServiceAccount: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling ServiceAccount: %w", err)
 	}
 
 	cfg := &operandConfig{
 		namespace:       c.config.Namespace,
-		karpenterImage:  c.config.KarpenterImage,
+		karpenterImage:  karpenterImage,
 		clusterName:     c.config.ClusterName,
 		clusterEndpoint: c.config.ClusterEndpoint,
 		cloudProvider:   c.config.CloudProvider,
 		imagePullPolicy: corev1.PullIfNotPresent,
 		logLevelArg:     "--log-level=debug", // TODO(maxcao13): make this configurable
+		releaseVersion:  hcp.Status.ControlPlaneVersion.Desired.Version,
 		additionalEnv: []corev1.EnvVar{
 			{Name: common.KubeconfigEnvName, Value: targetKubeconfigMountPath + "/" + targetKubeconfigFilePath},
 			{Name: common.DisableLeaderElectionEnvName, Value: "true"},
@@ -109,7 +130,7 @@ func (c *HCPController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName:  hcp.Spec.InfraID + "-kubeconfig",
-						DefaultMode: ptr.To(int32(0640)),
+						DefaultMode: new(int32(0640)),
 						Items: []corev1.KeyToPath{
 							{Key: targetKubeconfigSecretKey, Path: targetKubeconfigFilePath},
 						},
@@ -124,7 +145,10 @@ func (c *HCPController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		additionalInitContainers: []corev1.Container{tokenMinterContainer(c.config.TokenMinterImage)},
 	}
 	if err := applyDeployment(ctx, c.client, cfg, ref); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
+		return ctrl.Result{}, fmt.Errorf("reconciling Deployment: %w", err)
+	}
+	if err := applyPodMonitor(ctx, c.client, cfg, ref); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling PodMonitor: %w", err)
 	}
 
 	return ctrl.Result{}, nil
@@ -136,8 +160,9 @@ func (c *HCPController) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(c.Name()).
-		For(&hyperv1.HostedControlPlane{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}, hcpOperandReconcilePredicate())).
+		For(&hyperv1beta1.HostedControlPlane{}, builder.WithPredicates(hcpOperandReconcilePredicate())).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(karpenterFilterPredicate)).
+		Owns(&monitoringv1.PodMonitor{}, builder.WithPredicates(karpenterFilterPredicate)).
 		Owns(&corev1.ServiceAccount{}, builder.WithPredicates(karpenterFilterPredicate)).
 		Complete(c)
 }
@@ -151,27 +176,40 @@ func hcpOperandReconcilePredicate() predicate.Predicate {
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldHCP, okOld := e.ObjectOld.(*hyperv1.HostedControlPlane)
-			newHCP, okNew := e.ObjectNew.(*hyperv1.HostedControlPlane)
+			oldHCP, okOld := e.ObjectOld.(*hyperv1beta1.HostedControlPlane)
+			newHCP, okNew := e.ObjectNew.(*hyperv1beta1.HostedControlPlane)
 			if !okOld || !okNew {
 				return true
 			}
-			return hcpOperandSpecChanged(oldHCP, newHCP)
+			return hcpOperandChanged(oldHCP, newHCP)
 		},
 	}
 }
 
-func hcpOperandSpecChanged(oldHCP, newHCP *hyperv1.HostedControlPlane) bool {
+func hcpOperandChanged(oldHCP, newHCP *hyperv1beta1.HostedControlPlane) bool {
 	if oldHCP == nil || newHCP == nil {
 		return true
 	}
-	return oldHCP.Spec.InfraID != newHCP.Spec.InfraID ||
+
+	// Check spec changes
+	specChanged := oldHCP.Spec.InfraID != newHCP.Spec.InfraID ||
 		!equality.Semantic.DeepEqual(oldHCP.Spec.AutoNode, newHCP.Spec.AutoNode)
+
+	// Check control plane version status changes (specific status field we care about)
+	oldVersion := oldHCP.Status.ControlPlaneVersion.Desired.Version
+	newVersion := newHCP.Status.ControlPlaneVersion.Desired.Version
+	versionChanged := oldVersion != newVersion
+
+	imageOverrideChanged := oldHCP.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation] !=
+		newHCP.Annotations[openshiftkarpenterv1.KarpenterImageOverrideAnnotation]
+
+	// Ignore unrelated annotations and status changes like Ready condition or kubeconfig.
+	return specChanged || versionChanged || imageOverrideChanged
 }
 
-func hcpOwnerRef(hcp *hyperv1.HostedControlPlane) *metaac.OwnerReferenceApplyConfiguration {
+func hcpOwnerRef(hcp *hyperv1beta1.HostedControlPlane) *metaac.OwnerReferenceApplyConfiguration {
 	return metaac.OwnerReference().
-		WithAPIVersion(hyperv1.GroupVersion.String()).
+		WithAPIVersion(hyperv1beta1.GroupVersion.String()).
 		WithKind("HostedControlPlane").
 		WithName(hcp.Name).
 		WithUID(hcp.UID).
